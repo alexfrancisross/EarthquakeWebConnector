@@ -1,0 +1,328 @@
+<html>
+<!--******************************************************************************************************/
+/** Earthquake Web Connector For Tableau																**/
+/** Gets Data From http://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson 						**/
+/** Author Alex Ross 																					**/
+/** Version 1.0 updated for 9.1 beta 2                            										**/
+/*******************************************************************************************************-->
+<meta http-equiv="Cache-Control" content="no-store" />
+
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="">
+    <meta name="author" content="">
+
+    <!-- Title Core CSS -->
+    <title>USGS Earthquake Web Data Connector</title>
+
+    <!-- Bootstrap Core CSS -->
+    <link href="css/bootstrap.min.css" rel="stylesheet">
+
+    <!-- Custom CSS -->
+    <link href="css/stylish-portfolio.css" rel="stylesheet">
+
+    <!-- Custom Fonts -->
+    <link href="font-awesome/css/font-awesome.min.css" rel="stylesheet" type="text/css">
+    <link href="http://fonts.googleapis.com/css?family=Source+Sans+Pro:300,400,700,300italic,400italic,700italic" rel="stylesheet" type="text/css">
+
+    <!-- Comment the follwing line in and the line after out if you are not connected to the internet -->
+    <link rel="stylesheet" href="//code.jquery.com/ui/1.11.4/themes/smoothness/jquery-ui.css">
+    <script src="//code.jquery.com/jquery-1.10.2.js"></script>
+    <script src="//code.jquery.com/ui/1.11.4/jquery-ui.js"></script>
+    <script src="js/tableauwdc-1.1.0.js" type="text/javascript"></script>
+
+</head>
+
+<body>
+
+<script type="text/javascript">
+        (function() {
+
+            var LIMIT = 20000; //maximum number of events to be returned from Earthquake API in one go. Can't be set higher than 20000.
+            var INTERVAL = 30; //interval to chunk data in days. Can't be set higher than 30 days.
+
+            function init() {
+                tableau.initCallback();
+            }
+
+            function shutdown() {
+                tableau.shutdownCallback();
+            }
+
+            var myConnector = tableau.makeConnector();
+
+            myConnector.getColumnHeaders = function() {
+                var fieldNames = ['alert', 'cdi', 'code', 'detail', 'dmin', 'felt', 'gap', 'ids', 'mag', 'magType', 'mmi', 'net', 'nst', 'place', 'rms', 'sig', 'sources', 'status', 'time', 'title', 'tsunami', 'type', 'types', 'tz', 'updated', 'url', 'lon', 'lat', 'depth', 'id'];
+                var fieldTypes = ['string', 'string', 'float', 'string', 'float', 'float', 'float', 'string', 'float', 'string', 'string', 'string', 'float', 'string', 'float', 'float', 'string', 'string', 'datetime', 'string', 'float', 'string', 'string', 'string', 'datetime', 'string', 'float', 'float', 'float', 'string'];
+
+                tableau.headersCallback(fieldNames, fieldTypes); // tell tableau about the fields and their types
+            }
+
+            myConnector.getTableData = function(lastRecordToken) {
+                    if (!tableau) {
+                        alert("Earthquakewebconnect getColumnHeaders- tableau NOT defined!");
+                        return;
+                    }
+
+                    tableau.log("Earthquakewebconnect - getTableData connectionData=" + tableau.connectionData);
+                    tableau.log("Earthquakewebconnect - getTableData lastRecordToken=" + lastRecordToken);
+
+					//replace single quotes and get parameters from connection data
+                    var connectionData = (tableau.connectionData).replace(/'/g, "\"");
+                    connectionData = JSON.parse(connectionData);
+                    var minMagnitude = connectionData.minMagnitude.toString();
+                    var userStartDate = new Date(connectionData.userStartDate.toString());
+                    var userEndDate = new Date(connectionData.userEndDate.toString());
+                  
+				    //declare variables to be used by search
+                    var querystring;
+                    var count;
+                    var endDate;
+                    var startDate;
+                    var lastRecordNumber;
+
+                    if (lastRecordToken) {
+                        //test line to stop after one iteration
+                        //tableau.dataCallback([], lastRecordToken, false);
+                        //return;
+						
+                        //replace single quotes with double quotes  in lastRecordToken
+                        lastRecordToken = (lastRecordToken).replace(/'/g, "\"");
+                        lastRecordToken = JSON.parse(lastRecordToken);
+
+                        //parse lastRecordNumber as Integer as Tableau stores this as a string
+                        lastRecordNumber = parseInt(lastRecordToken.lastRecordNumber);
+						
+						//set end date and startdate
+                        endDate = lastRecordToken.endDate;
+                        startDate = new Date(endDate.substring(0, 10));
+
+						//if startdate is earlier than the start date entered by user then finished so call tableau.dataCallback
+                        if (startDate <= userStartDate)
+                        {
+                            tableau.dataCallback([], '', false);
+                            return;
+                        }
+
+                    } else {
+                        //Setup initial query string
+                        lastRecordNumber = 0;
+                        endDate = new Date(userEndDate).toJSON().slice(0, 10) + " 23:59:59";
+                        startDate = new Date(userEndDate);
+                    }
+
+                    //if start date is within INTERVAL days of the start date selected by user then use the start date selected by user
+                    var difference = (startDate - userStartDate) / 86400000; //1000 * 60 * 60 * 24
+                    if (difference < INTERVAL) {
+                        startDate = userStartDate;
+                    } else {
+						//else set start date to next interval
+                        startDate.setDate(startDate.getDate() - INTERVAL);
+                    }
+					
+					//format start date for use in querystring
+                    startDate = startDate.toJSON().slice(0, 10) + " 00:00:00";
+
+                    querystring = '&minmagnitude=' + minMagnitude + '&starttime=' + encodeURIComponent(startDate) + '&endtime=' + encodeURIComponent(endDate);
+
+					//count number of events that will be returned by this request
+                    var connectionUrl = _buildCountUrl(querystring);
+                    //console.log(connectionUrl);
+					
+                    var xhr1 = $.ajax({
+                        url: connectionUrl,
+                        dataType: 'json',
+                        success: function(countdata) {
+                            count = parseInt(countdata.count);
+                            //console.log('COUNT:' + count)
+
+							//if this is the first request or we can get all events in one request then no need to offset
+                            if (lastRecordNumber == 0 || count < LIMIT) {
+                                querystring = '&minmagnitude=' + minMagnitude + '&starttime=' + encodeURIComponent(startDate) + '&endtime=' + encodeURIComponent(endDate);
+                                lastRecordNumber = lastRecordNumber + 1; //offset the first time to ensure we dont get duplicate events
+                            } else {
+								//include offset in querystring
+                                querystring = '&minmagnitude=' + minMagnitude + '&starttime=' + encodeURIComponent(startDate) + '&endtime=' + encodeURIComponent(endDate) + '&offset=' + lastRecordNumber;
+                            }
+
+							//get the event data
+                            var connectionUrl = _buildUrl(querystring);
+                            //console.log(connectionUrl);
+                            var xhr = $.ajax({
+                                url: connectionUrl,
+                                dataType: 'json',
+                                success: function(data) {
+                                    var ii;
+                                    var toRet = [];
+                                    //console.log(data);
+                                    var features = data.features;
+
+                                    // mash the data into an array of objects
+                                    for (ii = 0; ii < features.length; ++ii) {
+
+                                        // Each entry can be a list of values in the same order as the columns
+                                        var entry = {
+                                            'alert': features[ii].properties.alert,
+                                            'cdi': features[ii].properties.cdi,
+                                            'code': features[ii].properties.code,
+                                            'detail': features[ii].properties.detail,
+                                            'dmin': features[ii].properties.dmin,
+                                            'felt': features[ii].properties.felt,
+                                            'gap': features[ii].properties.gap,
+                                            'ids': features[ii].properties.ids,
+                                            'mag': features[ii].properties.mag,
+                                            'magType': features[ii].properties.magType,
+                                            'mmi': features[ii].properties.mmi,
+                                            'net': features[ii].properties.net,
+                                            'nst': features[ii].properties.nst,
+                                            'place': features[ii].properties.place,
+                                            'rms': features[ii].properties.rms,
+                                            'sig': features[ii].properties.sig,
+                                            'sources': features[ii].properties.sources,
+                                            'status': features[ii].properties.status,
+                                            'time': new Date(features[ii].properties.time),
+                                            'title': features[ii].properties.time,
+                                            'tsunami': features[ii].properties.tsunami,
+                                            'type': features[ii].properties.type,
+                                            'types': features[ii].properties.types,
+                                            'tz': features[ii].properties.tz,
+                                            'updated': new Date(features[ii].properties.updated),
+                                            'url': features[ii].properties.url,
+                                            'lon': features[ii].geometry.coordinates[0],
+                                            'lat': features[ii].geometry.coordinates[1],
+                                            'depth': features[ii].geometry.coordinates[2],
+                                            'id': features[ii].id
+                                        };
+                                        toRet.push(entry);
+                                    }
+
+									lastRecordNumber = lastRecordNumber + toRet.length;
+                                    //if we have retrieved all of the events in the current interval then set the new end date to be the day before the previous start date
+									if (lastRecordNumber >= count) {
+									
+										endDate = new Date(startDate.substring(0, 10));
+										endDate = new Date(endDate.setDate(endDate.getDate() - 1));
+                                        endDate = endDate.toJSON().slice(0, 10) + " 23:59:59";
+                                        lastRecordNumber = 0;
+
+                                    } 
+
+                                    // Call back to Tableau with the table data
+                                    lastRecordToken = {
+                                        'endDate': endDate,
+                                        'lastRecordNumber': lastRecordNumber
+                                    }
+
+                                    //replace double quotes with single quotes before returning to Tableau
+                                    var NewlastRecordToken = JSON.stringify(lastRecordToken).replace(/\"/g, "'");
+                                    
+									tableau.dataCallback(toRet, NewlastRecordToken, true);
+                                }
+                            });
+                        }
+
+                    });
+                }
+
+            // builds search url to get earthquake events
+            function _buildUrl(querystring) {
+                var url = 'http://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson&orderby=time&limit=' + LIMIT + querystring;
+                return url;
+            }
+
+            // builds search url to get count of events within specified period
+            function _buildCountUrl(querystring) {
+                var url = 'http://earthquake.usgs.gov/fdsnws/event/1/count?format=geojson&orderby=time' + querystring;
+                return url;
+            }
+
+            tableau.registerConnector(myConnector);
+
+            $(document).ready(function() {
+                $("#inputForm").submit(function() { // This event fires when a button is clicked
+                    event.preventDefault();
+                    var numberField = $('input[type=number]'); // get the minimum magnitude entered
+                    if (!numberField || numberField.length == 0) {
+                        return;
+                    }
+                    var minMagnitude = numberField[0].value.toString().trim();
+
+                    var textField = $('input[type=text]'); // get the start and end dates
+                    if (!textField || textField.length == 0) {
+                        return;
+                    }
+                    var userStartDate = textField[0].value.trim();
+                    var userEndDate = textField[1].value.trim();
+					
+                    var connectionData = {
+                        'minMagnitude': minMagnitude,
+                        'userStartDate': userStartDate,
+                        'userEndDate': userEndDate
+                    }
+					// set the connection data as object with min magnitude start date and end date specified by user
+                    tableau.connectionData = JSON.stringify(connectionData).replace(/\"/g, "'");
+                    tableau.connectionName = 'Earthquakes From ' + userStartDate + ' To ' + userEndDate; // name the data source. 
+                    tableau.submit();
+                });
+            });
+        })();
+    </script>
+
+    <!-- Header -->
+    <header id="top" class="header">
+        <div class="text-vertical-center">
+            <h1>Tableau Earthquake Data Web Connector</h1>
+            <br>
+
+            <form id="inputForm" action="">
+                <p class="lead">
+                    Minimum Magnitude:
+                    <!--  <input type="text" name="minMagnitude" value="0" style="width: 150px;" /> -->
+                    <input type="number" name="minMagnitude" id="minMagnitude" min="0" max="10" step="0.1" value="6" style="width: 150px;" />
+                    <br></br>
+                    Start Date:
+                    <input type="text" name="userStartDate" id="userStartDate" />
+                    <script>
+                        $(function() {
+                            var date = new Date();
+                            date.setDate(date.getDate() - 365);
+                            $("#userStartDate").val((date.getMonth() + 1) + '/' + date.getDate() + '/' + date.getFullYear());
+                            $("#userStartDate").datepicker();
+                        });
+                    </script>
+                    <br></br>
+                    End Date:
+                    <input type="text" name="userEndDate" id="userEndDate" />
+                    <script>
+                        $(function() {
+                            var date = new Date();
+                            $("#userEndDate").val((date.getMonth() + 1) + '/' + date.getDate() + '/' + date.getFullYear());
+                            $("#userEndDate").datepicker();
+                        });
+                    </script>
+
+
+                </p>
+
+                <p class="lead">
+                    <input class="btn btn-dark btn-lg" type="submit" value="Get Earthquake Data">
+                </p>
+            </form>
+            <!-- About -->
+            <section id="about" class="about">
+                <div class="container">
+                    <div class="row">
+                        <div class="col-lg-12 text-center">
+                            <p class="lead">This Web Data Connector is Powered By The <a target="_blank" href="http://earthquake.usgs.gov/earthquakes/search/">USGS Earthquake API</a>.</p>
+                        </div>
+                    </div>
+                    <!-- /.row -->
+                </div>
+                <!-- /.container -->
+            </section>
+
+</body>
+
+</html>
